@@ -23,8 +23,6 @@
 |:---:|:---:|:---:|
 | ![Map](assets/map.png) | ![Heatmap](assets/heatmap.png) | ![Table](assets/table.png) |
 
-> 🎥 [Full System Demo](assets/demo.gif)
-
 ---
 
 ## ✨ What Makes AEGIS Different
@@ -212,16 +210,6 @@ pytest tests/ -v
 ✔ 100% passing
 ```
 
----
-
-## 🔮 Roadmap
-
-- [ ] RBAC authentication layer
-- [ ] Kafka-based telemetry streaming
-- [ ] Multi-city infrastructure simulation
-- [ ] Deep learning anomaly models (LSTM / Autoencoder)
-
----
 
 ## 🏁 Summary
 
