@@ -235,3 +235,112 @@ export interface StarTopology {
   interconnect_ratio: number;
   confidence: number;
 }
+
+
+/* ═══════════════════════════════════════
+   ATTRIBUTION ENGINE v2 — NEW TYPES
+   ═══════════════════════════════════════ */
+
+/** XAI Radar chart axis */
+export interface RadarAxis {
+  axis: string;
+  value: number;
+  weight: number;
+}
+
+/** Transparent attribution metadata (XAI) */
+export interface AttributionMetadataResponse {
+  score_weights: Record<string, number>;
+  signal_contributions: Record<string, number>;
+  timing_entropy: number;
+  header_sequence_likelihood: number;
+  graph_centrality_score: number;
+  method_ratio_score: number;
+  behavioral_score: number;
+  radar_chart_data: RadarAxis[];
+}
+
+/** BFS Blast Radius result */
+export interface BlastRadiusResponse {
+  origin: string;
+  origin_score: number;
+  compromised_nodes: string[];
+  compromised_edges: [string, string][];
+  depth: number;
+  total_impact: number;
+}
+
+/** Cluster super-node (auto-collapsed low-score nodes) */
+export interface ClusterNode {
+  id: string;
+  score: number;
+  maxScore: number;
+  type: 'cluster';
+  community: number;
+  isHub: boolean;
+  isBridge: boolean;
+  connections: number;
+  memberCount: number;
+  memberIds: string[];
+  primaryIndicator: string;
+}
+
+/** Sankey diagram node */
+export interface SankeyNode {
+  name: string;
+  category: string;
+}
+
+/** Sankey diagram link */
+export interface SankeyLink {
+  source: number;
+  target: number;
+  value: number;
+  category: 'legitimate' | 'shadow';
+}
+
+/** Sankey diagram data for Golden Image contrast */
+export interface SankeyData {
+  nodes: SankeyNode[];
+  links: SankeyLink[];
+}
+
+/** Shadow Controller detection result */
+export interface ShadowController {
+  node_id: string;
+  request_count: number;
+  jitter: number;
+  timing_entropy_normalized: number;
+  shadow_controller_score: number;
+  pattern_type: string;
+}
+
+/** Zoom-to-controller ego graph response */
+export interface ZoomResponse {
+  nodes: (ThreatNode & { isController?: boolean })[];
+  links: ThreatLink[];
+  metadata: {
+    controllerId: string;
+    neighborCount: number;
+    egoNodeCount: number;
+  };
+}
+
+/** Baseline / Golden Image response */
+export interface BaselineResponse {
+  header_transition_matrix: Record<string, Record<string, number>>;
+  fingerprint_stats: Record<string, number>;
+  avg_timing_entropy: number;
+  computed_at: number;
+}
+
+/** AsyncLogTailer ingestion stats */
+export interface IngestionStats {
+  running: boolean;
+  window_size: number;
+  window_capacity: number;
+  total_ingested: number;
+  error_count: number;
+  ingest_rate_per_sec: number;
+  uptime_seconds: number;
+}

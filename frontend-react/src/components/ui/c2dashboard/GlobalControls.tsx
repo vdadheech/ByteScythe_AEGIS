@@ -17,7 +17,7 @@ interface GlobalControlsProps {
 }
 
 export function GlobalControls({ onGenerateData, onClear, isStreaming }: GlobalControlsProps) {
-  const { confidenceThreshold, setConfidenceThreshold, setTimeRange, timeRange } = useThreatStore();
+  const { confidenceThreshold, setConfidenceThreshold, setTimeRange } = useThreatStore();
   const stats = useThreatStats();
   const [selectedTimeRange, setSelectedTimeRange] = useState<string>('1h');
 

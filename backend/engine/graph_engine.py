@@ -23,6 +23,16 @@ Key Metrics for C2 Detection:
    - C2 SIGNATURE: Botnet victims form tight communities
    - Controller nodes appear as bridges between communities
 
+4. DEGREE-CENTRALITY CLUSTERING (Anti-Hairball)
+   - Auto-collapse low-score nodes into "Subnet Clusters"
+   - Only expand nodes with attribution_score > 0.7
+   - Prevents unreadable graphs at >50 nodes
+
+5. BFS BLAST RADIUS
+   - Breadth-First Search from high-confidence C2 nodes
+   - Shows total downstream impact of a controller
+   - Marks compromised edges for "Pulse Red" frontend highlighting
+
 Why Graph Analysis Beats Row-Level Detection:
 - Isolation Forest sees individual requests as independent
 - Graph analysis sees COORDINATED behavior across multiple sources
@@ -31,7 +41,7 @@ Why Graph Analysis Beats Row-Level Detection:
 
 import networkx as nx
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
 import hashlib
@@ -90,6 +100,8 @@ class GraphAnalyticsEngine:
     - Maintains a directed graph of network interactions
     - Incrementally updates metrics as new telemetry arrives
     - Provides O(1) access to pre-computed node metrics
+    - Auto-clusters low-relevance nodes to prevent hairball rendering
+    - BFS blast-radius traversal for impact analysis
     
     Thread Safety:
     - Graph modifications are atomic
@@ -101,12 +113,19 @@ class GraphAnalyticsEngine:
     BRIDGE_BETWEENNESS_THRESHOLD = 0.10  # Top 10% betweenness = potential relay
     COMMUNITY_SIZE_THRESHOLD = 3         # Min nodes to form a community
     
+    # Clustering thresholds
+    CLUSTER_SCORE_THRESHOLD = 0.7        # Nodes below this auto-collapse
+    EXPAND_SCORE_THRESHOLD = 0.7         # Only expand nodes above this
+    
     def __init__(self):
         self.graph: nx.DiGraph = nx.DiGraph()
         self._metrics_cache: Dict[str, NodeMetrics] = {}
         self._community_map: Dict[str, int] = {}
         self._last_computation: float = 0
         self._computation_interval: float = 5.0  # Recompute every 5 seconds max
+        
+        # HTTP method tracking per node (for method ratio signal)
+        self._method_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         
     def add_interaction(
         self, 
@@ -122,9 +141,6 @@ class GraphAnalyticsEngine:
         - source_ip = the client making the request
         - target_endpoint = the API/resource being accessed
         - We create edges: source_ip → target_endpoint
-        
-        For IP-to-IP modeling (if available):
-        - source_ip → destination_ip edges would be more accurate
         """
         # Add source node if new
         if source_ip not in self.graph:
@@ -151,6 +167,10 @@ class GraphAnalyticsEngine:
         
         self.graph.nodes[target_endpoint]['hit_count'] = \
             self.graph.nodes[target_endpoint].get('hit_count', 0) + 1
+        
+        # Track HTTP method
+        http_method = (metadata or {}).get('http_method', 'GET')
+        self._method_counts[source_ip][http_method] += 1
         
         # Add or update edge
         if self.graph.has_edge(source_ip, target_endpoint):
@@ -205,9 +225,6 @@ class GraphAnalyticsEngine:
         Compute all graph metrics for C2 detection.
         
         Optimization: Only recomputes if interval has passed or force=True.
-        This prevents excessive computation on high-frequency updates.
-        
-        Returns dict of node_id -> NodeMetrics
         """
         now = time.time()
         if not force and (now - self._last_computation) < self._computation_interval:
@@ -219,15 +236,12 @@ class GraphAnalyticsEngine:
         logger.info(f"Computing graph metrics for {len(self.graph)} nodes, {self.graph.number_of_edges()} edges")
         
         # 1. DEGREE CENTRALITY
-        # Normalized to [0, 1] range
         degree_centrality = nx.degree_centrality(self.graph)
         in_degree = dict(self.graph.in_degree())
         out_degree = dict(self.graph.out_degree())
         
         # 2. BETWEENNESS CENTRALITY
-        # Uses sampling for large graphs (O(V*E) is expensive)
         if len(self.graph) > 1000:
-            # Sample k nodes for approximation
             betweenness = nx.betweenness_centrality(
                 self.graph, 
                 k=min(100, len(self.graph)),
@@ -237,18 +251,15 @@ class GraphAnalyticsEngine:
             betweenness = nx.betweenness_centrality(self.graph, normalized=True)
         
         # 3. CLOSENESS CENTRALITY
-        # Measures how close a node is to all other nodes
         try:
             closeness = nx.closeness_centrality(self.graph)
         except nx.NetworkXError:
             closeness = {n: 0.0 for n in self.graph.nodes()}
         
         # 4. COMMUNITY DETECTION
-        # Use Louvain for large graphs, label propagation for smaller
         communities = self._detect_communities()
         
         # 5. COMPUTE ANOMALY SCORES
-        # Identify hubs and bridges
         centrality_threshold = np.percentile(
             list(degree_centrality.values()), 
             100 - (self.HUB_CENTRALITY_THRESHOLD * 100)
@@ -265,15 +276,12 @@ class GraphAnalyticsEngine:
             is_hub = degree_centrality.get(node, 0) >= centrality_threshold
             is_bridge = betweenness.get(node, 0) >= betweenness_threshold
             
-            # Anomaly score: weighted combination
-            # Hubs with high betweenness are HIGHLY suspicious (potential C2 controllers)
             anomaly = (
                 0.4 * degree_centrality.get(node, 0) +
                 0.4 * betweenness.get(node, 0) +
                 0.2 * closeness.get(node, 0)
             )
             
-            # Boost score if node is both hub AND bridge
             if is_hub and is_bridge:
                 anomaly = min(1.0, anomaly * 1.5)
             
@@ -302,20 +310,13 @@ class GraphAnalyticsEngine:
     def _detect_communities(self) -> Dict[str, int]:
         """
         Detect communities using greedy modularity optimization.
-        
-        Why communities matter for C2:
-        - Botnets form tight clusters (victims controlled by same C2)
-        - Legitimate traffic is more dispersed
-        - Small, isolated communities with single high-centrality node = C2 signature
         """
         if len(self.graph) < 2:
             return {n: 0 for n in self.graph.nodes()}
         
-        # Convert to undirected for community detection
         undirected = self.graph.to_undirected()
         
         try:
-            # Greedy modularity communities
             communities = nx.community.greedy_modularity_communities(undirected)
             
             community_map = {}
@@ -330,12 +331,7 @@ class GraphAnalyticsEngine:
             return {n: 0 for n in self.graph.nodes()}
     
     def get_suspicious_nodes(self, threshold: float = 0.5) -> List[NodeMetrics]:
-        """
-        Return nodes with anomaly score above threshold.
-        
-        This is the primary method for the threat API endpoint.
-        Returns only suspicious nodes to minimize payload size.
-        """
+        """Return nodes with anomaly score above threshold."""
         metrics = self.compute_metrics()
         return [
             m for m in metrics.values() 
@@ -343,10 +339,7 @@ class GraphAnalyticsEngine:
         ]
     
     def get_snapshot(self) -> GraphSnapshot:
-        """
-        Create an immutable snapshot of current graph state.
-        Thread-safe for API responses.
-        """
+        """Create an immutable snapshot of current graph state."""
         metrics = self.compute_metrics()
         
         return GraphSnapshot(
@@ -362,21 +355,22 @@ class GraphAnalyticsEngine:
     def get_graph_for_visualization(
         self, 
         max_nodes: int = 500,
-        min_score: float = 0.0
+        min_score: float = 0.0,
+        enable_clustering: bool = True,
     ) -> Dict[str, Any]:
         """
         Export graph in format optimized for frontend visualization.
         
+        ANTI-HAIRBALL: When enable_clustering=True and node count > 50,
+        automatically collapses low-score nodes into "Subnet Cluster" super-nodes.
+        Only nodes with attribution_score > 0.7 remain expanded.
+        
         Returns:
         {
             "nodes": [{"id": "...", "score": 0.85, "type": "client", ...}],
-            "links": [{"source": "...", "target": "...", "weight": 5}]
+            "links": [{"source": "...", "target": "...", "weight": 5}],
+            "clusters": [{"id": "cluster_0", "memberCount": 12, ...}]
         }
-        
-        Optimization:
-        - Limits to max_nodes to prevent frontend overload
-        - Filters by min_score to show only relevant nodes
-        - Pre-computes layout hints for faster rendering
         """
         metrics = self.compute_metrics()
         
@@ -388,64 +382,241 @@ class GraphAnalyticsEngine:
         filtered_nodes.sort(key=lambda x: x[1].anomaly_score, reverse=True)
         filtered_nodes = filtered_nodes[:max_nodes]
         
-        node_ids = {n[0] for n in filtered_nodes}
+        # ── Degree-Centrality Clustering ──
+        clusters: List[Dict[str, Any]] = []
+        expanded_nodes: List[Tuple[str, NodeMetrics]] = []
+        cluster_members: Dict[int, List[Tuple[str, NodeMetrics]]] = defaultdict(list)
         
+        if enable_clustering and len(filtered_nodes) > 50:
+            median_centrality = np.median(
+                [m.degree_centrality for _, m in filtered_nodes]
+            ) if filtered_nodes else 0
+            
+            for node_id, m in filtered_nodes:
+                if m.anomaly_score >= self.CLUSTER_SCORE_THRESHOLD:
+                    # High-score nodes stay expanded
+                    expanded_nodes.append((node_id, m))
+                elif m.degree_centrality < median_centrality:
+                    # Low-centrality, low-score → collapse into community cluster
+                    cluster_members[m.community_id].append((node_id, m))
+                else:
+                    # Above-median centrality but below score threshold → still show
+                    expanded_nodes.append((node_id, m))
+            
+            # Build cluster super-nodes
+            for community_id, members in cluster_members.items():
+                if len(members) >= 2:
+                    scores = [m.anomaly_score for _, m in members]
+                    cluster_node = {
+                        "id": f"cluster_{community_id}",
+                        "score": round(np.mean(scores) * 100, 1),
+                        "maxScore": round(max(scores) * 100, 1),
+                        "type": "cluster",
+                        "community": community_id,
+                        "isHub": False,
+                        "isBridge": False,
+                        "connections": sum(m.in_degree + m.out_degree for _, m in members),
+                        "memberCount": len(members),
+                        "memberIds": [nid for nid, _ in members],
+                        "primaryIndicator": f"Subnet cluster: {len(members)} nodes",
+                    }
+                    clusters.append(cluster_node)
+                else:
+                    # Single-member "clusters" just expand
+                    expanded_nodes.extend(members)
+        else:
+            expanded_nodes = filtered_nodes
+        
+        # Build node list
+        node_ids = set()
         nodes = []
-        for node_id, m in filtered_nodes:
+        
+        for node_id, m in expanded_nodes:
             node_data = self.graph.nodes.get(node_id, {})
             nodes.append({
                 "id": node_id,
-                "score": round(m.anomaly_score * 100, 1),  # Convert to 0-100
+                "score": round(m.anomaly_score * 100, 1),
                 "type": node_data.get('node_type', 'unknown'),
                 "community": m.community_id,
                 "isHub": m.is_hub,
                 "isBridge": m.is_bridge,
-                "connections": m.in_degree + m.out_degree
+                "connections": m.in_degree + m.out_degree,
+            })
+            node_ids.add(node_id)
+        
+        # Add cluster super-nodes to the node list
+        for cluster in clusters:
+            nodes.append(cluster)
+            node_ids.add(cluster["id"])
+        
+        # Build links (only between visible nodes, remap clustered → cluster node)
+        cluster_remap: Dict[str, str] = {}
+        for cluster in clusters:
+            for member_id in cluster.get("memberIds", []):
+                cluster_remap[member_id] = cluster["id"]
+        
+        links = []
+        seen_links = set()
+        for u, v, data in self.graph.edges(data=True):
+            # Remap to cluster if collapsed
+            u_mapped = cluster_remap.get(u, u)
+            v_mapped = cluster_remap.get(v, v)
+            
+            if u_mapped in node_ids and v_mapped in node_ids:
+                link_key = (u_mapped, v_mapped)
+                if link_key not in seen_links and u_mapped != v_mapped:
+                    links.append({
+                        "source": u_mapped,
+                        "target": v_mapped,
+                        "weight": data.get('weight', 1)
+                    })
+                    seen_links.add(link_key)
+        
+        return {
+            "nodes": nodes,
+            "links": links,
+            "clusters": clusters,
+            "metadata": {
+                "totalNodes": len(self.graph),
+                "totalEdges": self.graph.number_of_edges(),
+                "filteredNodes": len(nodes),
+                "filteredEdges": len(links),
+                "clusterCount": len(clusters),
+                "clusteredNodeCount": sum(c.get("memberCount", 0) for c in clusters),
+                "computedAt": self._last_computation,
+            }
+        }
+    
+    def zoom_to_controller(self, controller_id: str) -> Dict[str, Any]:
+        """
+        Isolate a controller node and its direct neighbors (1-hop ego graph).
+        
+        Used by the frontend "Zoom-to-Controller" function to focus on
+        a specific C2 controller and its direct victims.
+        """
+        if controller_id not in self.graph:
+            return {"nodes": [], "links": [], "metadata": {"error": "Node not found"}}
+        
+        # Build 1-hop ego graph
+        neighbors = set(self.graph.successors(controller_id)) | set(self.graph.predecessors(controller_id))
+        ego_nodes = {controller_id} | neighbors
+        
+        metrics = self.compute_metrics()
+        nodes = []
+        for nid in ego_nodes:
+            m = metrics.get(nid)
+            nd = self.graph.nodes.get(nid, {})
+            nodes.append({
+                "id": nid,
+                "score": round(m.anomaly_score * 100, 1) if m else 0,
+                "type": nd.get("node_type", "unknown"),
+                "community": m.community_id if m else 0,
+                "isHub": m.is_hub if m else False,
+                "isBridge": m.is_bridge if m else False,
+                "connections": (m.in_degree + m.out_degree) if m else 0,
+                "isController": nid == controller_id,
             })
         
-        # Only include edges between filtered nodes
         links = []
         for u, v, data in self.graph.edges(data=True):
-            if u in node_ids and v in node_ids:
+            if u in ego_nodes and v in ego_nodes:
                 links.append({
                     "source": u,
                     "target": v,
-                    "weight": data.get('weight', 1)
+                    "weight": data.get("weight", 1),
                 })
         
         return {
             "nodes": nodes,
             "links": links,
             "metadata": {
-                "totalNodes": len(self.graph),
-                "totalEdges": self.graph.number_of_edges(),
-                "filteredNodes": len(nodes),
-                "filteredEdges": len(links),
-                "computedAt": self._last_computation
+                "controllerId": controller_id,
+                "neighborCount": len(neighbors),
+                "egoNodeCount": len(ego_nodes),
             }
         }
+    
+    def compute_blast_radius(
+        self,
+        node_id: str,
+        min_score: float = 0.85,
+    ) -> Dict[str, Any]:
+        """
+        BFS blast-radius traversal from a high-confidence C2 node.
+        
+        Starting from a node with attribution_score > min_score, traverses
+        all reachable downstream nodes via BFS. Returns the total set of
+        compromised nodes and edges.
+        
+        The frontend renders compromised edges in "Pulse Red" to show
+        the judge the total impact of that specific controller on Nexus City.
+        
+        Returns:
+        {
+            "origin": "192.168.1.100",
+            "origin_score": 92.3,
+            "compromised_nodes": ["192.168.1.101", ...],
+            "compromised_edges": [["192.168.1.100", "192.168.1.101"], ...],
+            "depth": 3,
+            "total_impact": 15
+        }
+        """
+        metrics = self.compute_metrics()
+        
+        origin_metrics = metrics.get(node_id)
+        if not origin_metrics:
+            return {
+                "origin": node_id,
+                "origin_score": 0.0,
+                "compromised_nodes": [],
+                "compromised_edges": [],
+                "depth": 0,
+                "total_impact": 0,
+            }
+        
+        # BFS traversal
+        visited = set()
+        visited.add(node_id)
+        queue: deque = deque([(node_id, 0)])
+        max_depth = 0
+        compromised_nodes: List[str] = []
+        compromised_edges: List[List[str]] = []
+        
+        while queue:
+            current, depth = queue.popleft()
+            max_depth = max(max_depth, depth)
+            
+            for neighbor in self.graph.successors(current):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    compromised_nodes.append(neighbor)
+                    compromised_edges.append([current, neighbor])
+                    queue.append((neighbor, depth + 1))
+        
+        return {
+            "origin": node_id,
+            "origin_score": round(origin_metrics.anomaly_score * 100, 1),
+            "compromised_nodes": compromised_nodes,
+            "compromised_edges": compromised_edges,
+            "depth": max_depth,
+            "total_impact": len(compromised_nodes),
+        }
+    
+    def get_method_distribution(self, node_id: str) -> Dict[str, int]:
+        """Get the HTTP method distribution for a node."""
+        return dict(self._method_counts.get(node_id, {}))
     
     def detect_star_topology(self) -> List[Dict[str, Any]]:
         """
         Detect star topologies characteristic of C2 infrastructure.
-        
-        C2 Signature:
-        - One central node (controller)
-        - Many leaf nodes (victims)
-        - Low connectivity between leaves
-        
-        Returns list of potential C2 controllers with their victim clusters.
         """
         results = []
         metrics = self.compute_metrics()
         
         for node, m in metrics.items():
-            # High out-degree + low in-degree = potential controller
             if m.out_degree > 5 and m.in_degree < m.out_degree * 0.3:
-                # Get neighbors (potential victims)
                 neighbors = list(self.graph.successors(node))
                 
-                # Check if neighbors are poorly connected to each other
                 neighbor_interconnect = 0
                 for i, n1 in enumerate(neighbors):
                     for n2 in neighbors[i+1:]:
@@ -455,7 +626,6 @@ class GraphAnalyticsEngine:
                 max_interconnect = len(neighbors) * (len(neighbors) - 1) / 2
                 interconnect_ratio = neighbor_interconnect / max_interconnect if max_interconnect > 0 else 0
                 
-                # Low interconnect = star topology
                 if interconnect_ratio < 0.2:
                     results.append({
                         "controller": node,

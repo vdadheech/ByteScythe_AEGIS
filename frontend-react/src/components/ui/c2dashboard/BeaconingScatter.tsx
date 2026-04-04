@@ -15,14 +15,9 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
-  Legend,
 } from 'recharts';
 import { useThreatStore } from './useThreatStore';
-import type { ThreatNode, TimingPoint } from './types';
-
-interface BeaconingScatterProps {
-  height?: number;
-}
+import type { TimingPoint } from './types';
 
 // Format time for axis
 function formatTime(timestamp: number): string {
@@ -47,7 +42,7 @@ function CustomTooltip({ active, payload }: { active?: boolean; payload?: Array<
   );
 }
 
-export function BeaconingScatter({ height = 300 }: BeaconingScatterProps) {
+export function BeaconingScatter() {
   const { getSelectedNode, selectedNodeId } = useThreatStore();
   const selectedNode = getSelectedNode();
 

@@ -31,6 +31,7 @@ from backend.engine.graph_engine import get_graph_engine
 from backend.engine.temporal_engine import get_temporal_engine
 from backend.engine.header_fingerprint import get_header_engine
 from backend.engine.attribution_scorer import get_attribution_scorer, ThreatLevel
+from backend.engine.ingestion import get_log_tailer
 from backend.services.async_pipeline import (
     get_processing_pipeline, 
     ProcessingTask, 
@@ -377,6 +378,143 @@ async def get_pipeline_stats():
         return pipeline.get_stats()
     except Exception as e:
         logger.error(f"Error getting pipeline stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/blast-radius/{node_id}")
+async def get_blast_radius(node_id: str):
+    """
+    BFS blast-radius traversal from a high-confidence C2 node.
+    
+    Returns all compromised downstream nodes and edges.
+    Frontend renders compromised edges in animated "Pulse Red".
+    """
+    try:
+        graph = get_graph_engine()
+        result = graph.compute_blast_radius(node_id)
+        return result
+    except Exception as e:
+        logger.error(f"Error computing blast radius for {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/zoom/{node_id}")
+async def zoom_to_controller(node_id: str):
+    """
+    Zoom-to-Controller: isolate a node and its 1-hop neighbors.
+    Returns the ego subgraph for focused analysis.
+    """
+    try:
+        graph = get_graph_engine()
+        return graph.zoom_to_controller(node_id)
+    except Exception as e:
+        logger.error(f"Error in zoom-to-controller for {node_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/baseline")
+async def get_baseline():
+    """
+    Returns the 'Golden Image' baseline fingerprint data.
+    Built from the Markov transition matrix of known-good browser traffic.
+    """
+    try:
+        headers = get_header_engine()
+        matrix = headers.get_markov_matrix()
+        stats = headers.get_fingerprint_stats()
+        
+        temporal = get_temporal_engine()
+        profiles = temporal.analyze_all_nodes()
+        entropies = [p.timing_entropy_normalized for p in profiles.values() if p.timing_entropy_normalized > 0]
+        avg_entropy = sum(entropies) / len(entropies) if entropies else 0.0
+        
+        return {
+            'header_transition_matrix': matrix,
+            'fingerprint_stats': stats,
+            'avg_timing_entropy': round(avg_entropy, 4),
+            'computed_at': time.time(),
+        }
+    except Exception as e:
+        logger.error(f"Error getting baseline: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sankey")
+async def get_sankey_data():
+    """
+    Returns Sankey diagram data: legitimate vs shadow sequence flows.
+    
+    Nodes represent header names, links represent transitions.
+    Legitimate flows (matching baseline) are green;
+    Shadow flows (deviating from baseline) are red.
+    """
+    try:
+        headers = get_header_engine()
+        matrix = headers.get_markov_matrix()
+        
+        if not matrix:
+            return {'nodes': [], 'links': []}
+        
+        # Build Sankey nodes from unique headers
+        header_set = set()
+        for src, transitions in matrix.items():
+            header_set.add(src)
+            header_set.update(transitions.keys())
+        
+        header_list = sorted(header_set)
+        header_idx = {h: i for i, h in enumerate(header_list)}
+        
+        nodes = []
+        for h in header_list:
+            nodes.append({"name": h, "category": "header"})
+        
+        # Build links from transition matrix
+        links = []
+        for src, transitions in matrix.items():
+            for tgt, prob in transitions.items():
+                if prob > 0.01:  # Filter noise
+                    category = "legitimate" if prob > 0.3 else "shadow"
+                    links.append({
+                        "source": header_idx[src],
+                        "target": header_idx[tgt],
+                        "value": round(prob * 100, 2),
+                        "category": category,
+                    })
+        
+        return {'nodes': nodes, 'links': links}
+    except Exception as e:
+        logger.error(f"Error getting sankey data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/shadow-controllers")
+async def get_shadow_controllers(
+    threshold: float = Query(0.5, ge=0, le=1, description="Minimum shadow controller score")
+):
+    """
+    Detect Shadow Controllers: periodic C2 with deliberate jitter evasion.
+    These are the most dangerous — periodic traffic + ~10% random jitter.
+    """
+    try:
+        temporal = get_temporal_engine()
+        controllers = temporal.get_shadow_controllers(threshold=threshold)
+        return {
+            'shadow_controllers': [c.to_dict() for c in controllers],
+            'count': len(controllers),
+        }
+    except Exception as e:
+        logger.error(f"Error getting shadow controllers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/ingestion/stats")
+async def get_ingestion_stats():
+    """Get AsyncLogTailer ingestion statistics."""
+    try:
+        tailer = get_log_tailer()
+        return tailer.get_stats()
+    except Exception as e:
+        logger.error(f"Error getting ingestion stats: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

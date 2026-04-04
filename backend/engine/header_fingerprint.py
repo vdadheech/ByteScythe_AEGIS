@@ -35,10 +35,24 @@ DETECTION STRATEGY:
 2. Compare against known browser fingerprints
 3. Flag unknown or suspicious fingerprints
 4. Cross-reference with User-Agent claims
+5. Markov Chain: Compute transition probabilities P(header_j | header_i)
+   and flag sequences whose product-likelihood falls below threshold
+
+MARKOV CHAIN LOGIC:
+-------------------
+Build a transition matrix from baseline (clean) traffic:
+    P(Accept-Language | Host) = 0.85  (browsers usually send this)
+    P(Accept | User-Agent)   = 0.92  (tools often skip this transition)
+
+For each new request, compute:
+    likelihood = Π P(h_{i+1} | h_i)
+    
+If likelihood < 0.1 relative to baseline → obfuscated automated agent.
 """
 
 import hashlib
 import re
+import math
 from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -111,6 +125,7 @@ class HeaderFingerprint:
     is_suspicious: bool
     anomaly_reasons: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    sequence_likelihood: float = 1.0  # Markov chain score
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -122,7 +137,8 @@ class HeaderFingerprint:
             'is_browser': self.is_browser,
             'is_suspicious': self.is_suspicious,
             'anomaly_reasons': self.anomaly_reasons,
-            'confidence': round(self.confidence, 3)
+            'confidence': round(self.confidence, 3),
+            'sequence_likelihood': round(self.sequence_likelihood, 6),
         }
 
 
@@ -137,6 +153,8 @@ class NodeHeaderProfile:
     header_anomaly_score: float = 0.0
     primary_fingerprint: Optional[str] = None
     is_consistent: bool = True
+    avg_sequence_likelihood: float = 1.0  # Mean Markov score
+    _likelihood_sum: float = field(default=0.0, repr=False)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -147,8 +165,154 @@ class NodeHeaderProfile:
             'suspicious_count': self.suspicious_count,
             'header_anomaly_score': round(self.header_anomaly_score, 3),
             'primary_fingerprint': self.primary_fingerprint,
-            'is_consistent': self.is_consistent
+            'is_consistent': self.is_consistent,
+            'avg_sequence_likelihood': round(self.avg_sequence_likelihood, 6),
         }
+
+
+class MarkovTransitionMatrix:
+    """
+    Markov Chain model for header sequence analysis.
+    
+    Instead of just checking "does Accept-Language exist?", we ask:
+    "Does Accept-Language FOLLOW Host, as it does in 85% of legitimate traffic?"
+    
+    The transition matrix stores P(header_j | header_i) — the probability
+    that header_j appears immediately after header_i.
+    
+    TRAINING:
+        Feed the first 10% of traffic (assumed clean) to build baseline.
+    
+    SCORING:
+        For a new request with header order [h1, h2, h3, ...]:
+        likelihood = P(h2|h1) * P(h3|h2) * ...
+        
+        If likelihood < 0.1 → flagged as obfuscated automated agent.
+    """
+    
+    # Smoothing constant to avoid zero-probability for unseen transitions
+    LAPLACE_SMOOTHING = 1e-6
+    
+    # If product-likelihood drops below this vs baseline, flag as suspicious
+    SUSPICION_THRESHOLD = 0.1
+    
+    def __init__(self):
+        # _counts[header_i][header_j] = number of times j followed i
+        self._counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self._row_totals: Dict[str, int] = defaultdict(int)
+        self._matrix: Dict[str, Dict[str, float]] = {}
+        self._is_trained: bool = False
+        self._vocabulary: Set[str] = set()
+        self._training_sequences: int = 0
+    
+    def train(self, header_sequences: List[List[str]]) -> None:
+        """
+        Build the baseline transition matrix from known-good traffic.
+        
+        Args:
+            header_sequences: List of header-order lists from clean traffic.
+                e.g. [['host','user-agent','accept'], ['host','accept','connection'], ...]
+        """
+        for seq in header_sequences:
+            if len(seq) < 2:
+                continue
+            normalized = [h.lower().strip() for h in seq]
+            self._vocabulary.update(normalized)
+            
+            for i in range(len(normalized) - 1):
+                h_from = normalized[i]
+                h_to = normalized[i + 1]
+                self._counts[h_from][h_to] += 1
+                self._row_totals[h_from] += 1
+            
+            self._training_sequences += 1
+        
+        # Compute probability matrix with Laplace smoothing
+        self._build_probability_matrix()
+        self._is_trained = True
+        
+        logger.info(
+            f"Markov matrix trained: {self._training_sequences} sequences, "
+            f"{len(self._vocabulary)} unique headers, "
+            f"{sum(len(v) for v in self._counts.values())} transitions"
+        )
+    
+    def train_from_known_browsers(self) -> None:
+        """
+        Bootstrap training from known browser fingerprint patterns.
+        Use this when no baseline traffic data is available.
+        """
+        sequences = list(KNOWN_BROWSER_FINGERPRINTS.values())
+        # Duplicate to give more weight
+        self.train(sequences * 5)
+    
+    def _build_probability_matrix(self) -> None:
+        """Convert raw counts to conditional probabilities with smoothing."""
+        vocab_size = max(len(self._vocabulary), 1)
+        self._matrix = {}
+        
+        for h_from, transitions in self._counts.items():
+            total = self._row_totals[h_from]
+            self._matrix[h_from] = {}
+            
+            for h_to in transitions:
+                # P(h_to | h_from) with Laplace smoothing
+                self._matrix[h_from][h_to] = (
+                    (transitions[h_to] + self.LAPLACE_SMOOTHING) /
+                    (total + self.LAPLACE_SMOOTHING * vocab_size)
+                )
+    
+    def score_sequence(self, header_order: List[str]) -> float:
+        """
+        Compute the sequence likelihood for a given header order.
+        
+        Returns a value in (0, 1]:
+        - Close to 1.0 = sequence matches baseline patterns
+        - Close to 0.0 = sequence is highly unusual
+        
+        Uses geometric mean of transition probabilities to avoid
+        sequence-length bias (longer sequences would always score lower).
+        """
+        if not self._is_trained or len(header_order) < 2:
+            return 1.0  # No model → assume legitimate
+        
+        normalized = [h.lower().strip() for h in header_order]
+        log_likelihood = 0.0
+        transition_count = 0
+        
+        for i in range(len(normalized) - 1):
+            h_from = normalized[i]
+            h_to = normalized[i + 1]
+            
+            if h_from in self._matrix and h_to in self._matrix[h_from]:
+                prob = self._matrix[h_from][h_to]
+            elif h_from in self._matrix:
+                # Known source header, unknown transition → very suspicious
+                prob = self.LAPLACE_SMOOTHING
+            else:
+                # Unknown source header → slightly less suspicious
+                prob = self.LAPLACE_SMOOTHING * 10
+            
+            log_likelihood += math.log(max(prob, 1e-20))
+            transition_count += 1
+        
+        if transition_count == 0:
+            return 1.0
+        
+        # Geometric mean = exp(mean(log_probs))
+        avg_log = log_likelihood / transition_count
+        geometric_mean = math.exp(avg_log)
+        
+        # Clamp to [0, 1]
+        return min(1.0, max(0.0, geometric_mean))
+    
+    def get_matrix_snapshot(self) -> Dict[str, Dict[str, float]]:
+        """Return a copy of the transition matrix for API/visualisation."""
+        return {k: dict(v) for k, v in self._matrix.items()}
+    
+    @property
+    def is_trained(self) -> bool:
+        return self._is_trained
 
 
 class HeaderFingerprintEngine:
@@ -160,6 +324,7 @@ class HeaderFingerprintEngine:
     2. User-Agent claims browser but headers don't match
     3. Missing standard browser headers (sec-ch-*, sec-fetch-*)
     4. Matches known tool signatures (requests, curl, etc.)
+    5. Markov Chain: header sequence transition probability vs baseline
     """
     
     def __init__(self):
@@ -167,6 +332,11 @@ class HeaderFingerprintEngine:
         self._node_profiles: Dict[str, NodeHeaderProfile] = {}
         self._browser_hashes = self._compute_browser_hashes()
         self._suspicious_hashes = self._compute_suspicious_hashes()
+        
+        # Markov Chain engine
+        self._markov = MarkovTransitionMatrix()
+        # Bootstrap with known browser patterns
+        self._markov.train_from_known_browsers()
     
     def _compute_browser_hashes(self) -> Dict[str, str]:
         """Pre-compute hashes for known browser patterns."""
@@ -229,6 +399,16 @@ class HeaderFingerprintEngine:
         
         return claimed, detected
     
+    def train_baseline(self, header_sequences: List[List[str]]) -> None:
+        """
+        Train the Markov transition matrix from a baseline traffic sample.
+        
+        Call this with the first 10% of traffic (assumed clean)
+        to build the "Golden Image" baseline fingerprint.
+        """
+        self._markov = MarkovTransitionMatrix()
+        self._markov.train(header_sequences)
+    
     def analyze_request(
         self,
         node_id: str,
@@ -266,6 +446,9 @@ class HeaderFingerprintEngine:
         is_known_browser = fp_hash in self._browser_hashes
         is_known_suspicious = fp_hash in self._suspicious_hashes
         
+        # ── Markov Chain sequence scoring ──
+        sequence_likelihood = self._markov.score_sequence(header_order_lower)
+        
         # Build anomaly reasons
         anomaly_reasons = []
         is_browser = False
@@ -286,6 +469,13 @@ class HeaderFingerprintEngine:
                 anomaly_reasons
             )
         
+        # Markov Chain flagging
+        if sequence_likelihood < self._markov.SUSPICION_THRESHOLD and self._markov.is_trained:
+            is_suspicious = True
+            anomaly_reasons.append(
+                f"Header sequence deviation: likelihood {sequence_likelihood:.4f} < threshold {self._markov.SUSPICION_THRESHOLD}"
+            )
+        
         # Check for UA spoofing
         if claimed_browser and detected_client and claimed_browser != detected_client:
             is_suspicious = True
@@ -299,7 +489,8 @@ class HeaderFingerprintEngine:
         # Calculate confidence
         confidence = self._calculate_confidence(
             is_known_browser, is_known_suspicious, 
-            len(anomaly_reasons), len(header_order)
+            len(anomaly_reasons), len(header_order),
+            sequence_likelihood,
         )
         
         fingerprint = HeaderFingerprint(
@@ -311,7 +502,8 @@ class HeaderFingerprintEngine:
             is_browser=is_browser,
             is_suspicious=is_suspicious,
             anomaly_reasons=anomaly_reasons,
-            confidence=confidence
+            confidence=confidence,
+            sequence_likelihood=sequence_likelihood,
         )
         
         # Cache and update node profile
@@ -364,7 +556,8 @@ class HeaderFingerprintEngine:
         is_known_browser: bool,
         is_known_suspicious: bool,
         anomaly_count: int,
-        header_count: int
+        header_count: int,
+        sequence_likelihood: float = 1.0,
     ) -> float:
         """Calculate detection confidence (0-1)."""
         if is_known_browser:
@@ -382,7 +575,10 @@ class HeaderFingerprintEngine:
         # More anomalies found = higher confidence in suspicion
         anomaly_bonus = min(0.2, anomaly_count * 0.05)
         
-        return min(0.85, base_confidence + header_bonus + anomaly_bonus)
+        # Markov deviation boosts confidence
+        markov_bonus = 0.15 * (1.0 - sequence_likelihood) if sequence_likelihood < 0.5 else 0.0
+        
+        return min(0.85, base_confidence + header_bonus + anomaly_bonus + markov_bonus)
     
     def _update_node_profile(self, node_id: str, fingerprint: HeaderFingerprint) -> None:
         """Update aggregated profile for a node."""
@@ -405,6 +601,10 @@ class HeaderFingerprintEngine:
         if fingerprint.is_suspicious:
             profile.suspicious_count += 1
         
+        # Track Markov sequence likelihoods
+        profile._likelihood_sum += fingerprint.sequence_likelihood
+        profile.avg_sequence_likelihood = profile._likelihood_sum / profile.total_requests
+        
         # Update primary fingerprint
         if profile.fingerprints_seen:
             profile.primary_fingerprint = max(
@@ -426,6 +626,7 @@ class HeaderFingerprintEngine:
         - Ratio of suspicious to total requests
         - Fingerprint consistency (bots are consistent, humans vary)
         - UA variation (bots typically don't change UA)
+        - Markov sequence deviation from baseline
         """
         if profile.total_requests == 0:
             return 0.0
@@ -447,10 +648,16 @@ class HeaderFingerprintEngine:
         else:
             ua_penalty = 0.0
         
+        # Markov sequence deviation penalty
+        markov_penalty = 0.0
+        if profile.avg_sequence_likelihood < 0.3:
+            markov_penalty = 0.25 * (1.0 - profile.avg_sequence_likelihood)
+        
         score = (
-            0.6 * suspicious_ratio +
-            0.2 * consistency_penalty +
-            0.2 * ua_penalty
+            0.45 * suspicious_ratio +
+            0.15 * consistency_penalty +
+            0.15 * ua_penalty +
+            0.25 * markov_penalty
         )
         
         return min(1.0, score)
@@ -477,8 +684,14 @@ class HeaderFingerprintEngine:
             'browser_fingerprints': browser_count,
             'suspicious_fingerprints': suspicious_count,
             'total_nodes': len(self._node_profiles),
-            'suspicious_nodes': len(self.get_suspicious_nodes())
+            'suspicious_nodes': len(self.get_suspicious_nodes()),
+            'markov_trained': self._markov.is_trained,
+            'markov_training_sequences': self._markov._training_sequences,
         }
+    
+    def get_markov_matrix(self) -> Dict[str, Dict[str, float]]:
+        """Return the Markov transition matrix for visualization/API."""
+        return self._markov.get_matrix_snapshot()
 
 
 # Singleton instance

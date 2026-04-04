@@ -17,10 +17,9 @@
  * 6. Raw metrics for analysts
  */
 
-import React, { useMemo } from 'react';
+import React from 'react';
 import type { 
   NodeDetailsResponse, 
-  AttributionResult, 
   SignalBreakdown,
   ThreatLevel,
 } from '../../types';
@@ -299,7 +298,7 @@ export const NodeInspector: React.FC<NodeInspectorProps> = ({
           Signal Analysis
         </h4>
         
-        {attribution.signals.map((signal, i) => (
+        {attribution.signals.map((signal) => (
           <SignalBar key={signal.name} signal={signal} />
         ))}
       </div>

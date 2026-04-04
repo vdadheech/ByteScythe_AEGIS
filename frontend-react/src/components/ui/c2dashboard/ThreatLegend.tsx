@@ -20,7 +20,7 @@ export function ThreatLegend() {
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      className="absolute top-4 right-4 bg-gray-900/90 backdrop-blur-sm rounded-xl p-4 border border-gray-700/50 shadow-xl"
+      className="absolute top-4 right-4 bg-gray-900/90 backdrop-blur-sm rounded-xl p-4 border border-gray-700/50 shadow-xl pointer-events-none z-10"
     >
       <div className="text-gray-400 text-xs uppercase tracking-wider mb-3 font-medium">
         Threat Level

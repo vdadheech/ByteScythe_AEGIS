@@ -10,6 +10,12 @@ import type {
   ThreatSummary,
   Community,
   StarTopology,
+  BlastRadiusResponse,
+  SankeyData,
+  ZoomResponse,
+  BaselineResponse,
+  ShadowController,
+  IngestionStats,
 } from '../types';
 
 export function fetchAssets(): Promise<AssetsResponse> {
@@ -41,10 +47,6 @@ export function quarantineNode(
    ACTIVE ATTRIBUTION ENGINE ENDPOINTS
    ═══════════════════════════════════════ */
 
-/**
- * Fetch active threats for graph visualization.
- * Returns only nodes with C2 confidence >= minScore.
- */
 export function fetchActiveThreats(params?: {
   minScore?: number;
   maxNodes?: number;
@@ -72,18 +74,12 @@ export function fetchActiveThreats(params?: {
   );
 }
 
-/**
- * Fetch detailed analysis for a specific node.
- */
 export function fetchNodeDetails(nodeId: string): Promise<NodeDetailsResponse> {
   return fetchWithRetry<NodeDetailsResponse>(
     `/v1/graph/node/${encodeURIComponent(nodeId)}`
   );
 }
 
-/**
- * Fetch timing data for scatter plot visualization.
- */
 export function fetchTimingData(params?: {
   maxPoints?: number;
   nodeFilter?: string;
@@ -103,16 +99,10 @@ export function fetchTimingData(params?: {
   );
 }
 
-/**
- * Fetch aggregate threat summary.
- */
 export function fetchThreatSummary(): Promise<ThreatSummary> {
   return fetchWithRetry<ThreatSummary>('/v1/graph/summary');
 }
 
-/**
- * Fetch detected communities.
- */
 export function fetchCommunities(minSize?: number): Promise<{ communities: Community[] }> {
   const query = minSize !== undefined ? `?min_size=${minSize}` : '';
   return fetchWithRetry<{ communities: Community[] }>(
@@ -120,18 +110,12 @@ export function fetchCommunities(minSize?: number): Promise<{ communities: Commu
   );
 }
 
-/**
- * Detect star topologies (C2 infrastructure patterns).
- */
 export function fetchStarTopologies(): Promise<{ starTopologies: StarTopology[]; count: number }> {
   return fetchWithRetry<{ starTopologies: StarTopology[]; count: number }>(
     '/v1/graph/star-topologies'
   );
 }
 
-/**
- * Get pipeline statistics.
- */
 export function fetchPipelineStats(): Promise<{
   running: boolean;
   workers: number;
@@ -142,3 +126,47 @@ export function fetchPipelineStats(): Promise<{
 }> {
   return fetchWithRetry('/v1/graph/pipeline/stats');
 }
+
+
+/* ═══════════════════════════════════════
+   ATTRIBUTION ENGINE v2 — NEW ENDPOINTS
+   ═══════════════════════════════════════ */
+
+/** BFS blast-radius from a C2 node */
+export function fetchBlastRadius(nodeId: string): Promise<BlastRadiusResponse> {
+  return fetchWithRetry<BlastRadiusResponse>(
+    `/v1/graph/blast-radius/${encodeURIComponent(nodeId)}`
+  );
+}
+
+/** Zoom to controller (1-hop ego graph) */
+export function fetchZoomToController(nodeId: string): Promise<ZoomResponse> {
+  return fetchWithRetry<ZoomResponse>(
+    `/v1/graph/zoom/${encodeURIComponent(nodeId)}`
+  );
+}
+
+/** Golden Image baseline data */
+export function fetchBaseline(): Promise<BaselineResponse> {
+  return fetchWithRetry<BaselineResponse>('/v1/graph/baseline');
+}
+
+/** Sankey diagram: legitimate vs shadow header sequences */
+export function fetchSankeyData(): Promise<SankeyData> {
+  return fetchWithRetry<SankeyData>('/v1/graph/sankey');
+}
+
+/** Shadow Controller detection */
+export function fetchShadowControllers(threshold?: number): Promise<{
+  shadow_controllers: ShadowController[];
+  count: number;
+}> {
+  const query = threshold !== undefined ? `?threshold=${threshold}` : '';
+  return fetchWithRetry(`/v1/graph/shadow-controllers${query}`);
+}
+
+/** AsyncLogTailer ingestion stats */
+export function fetchIngestionStats(): Promise<IngestionStats> {
+  return fetchWithRetry<IngestionStats>('/v1/graph/ingestion/stats');
+}
+

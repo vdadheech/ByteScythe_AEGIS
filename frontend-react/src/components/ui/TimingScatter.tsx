@@ -119,7 +119,6 @@ export const TimingScatter: React.FC<TimingScatterProps> = ({
   showBeaconsOnly = false,
 }) => {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [hoveredNode, setHoveredNode] = useState<string | null>(null);
 
   // Split points into beacon and human
   const { beaconPoints, humanPoints, filteredPoints } = useMemo(() => {

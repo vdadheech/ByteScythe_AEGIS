@@ -75,7 +75,6 @@ export function useAttributionEngine(
   
   const [summary, setSummary] = useState<ThreatSummary | null>(null);
   
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<NodeDetailsResponse | null>(null);
   
   const [isLoading, setIsLoading] = useState(true);
@@ -126,8 +125,6 @@ export function useAttributionEngine(
 
   // Select a node for detailed view
   const selectNode = useCallback(async (nodeId: string | null) => {
-    setSelectedNodeId(nodeId);
-    
     if (!nodeId) {
       setSelectedNode(null);
       return;

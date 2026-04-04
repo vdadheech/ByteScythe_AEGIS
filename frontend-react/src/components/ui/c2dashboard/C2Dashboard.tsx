@@ -47,7 +47,6 @@ export function C2Dashboard({
 }: C2DashboardProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
-  const [isReady, setIsReady] = useState(false);
   
   const { 
     setNodes, 
@@ -193,7 +192,6 @@ export function C2Dashboard({
             <NetworkGraph
               width={dimensions.width}
               height={dimensions.height}
-              onReady={() => setIsReady(true)}
             />
             <ThreatLegend />
           </motion.div>

@@ -28,7 +28,7 @@ const GLOW_COLORS = {
 };
 
 export function NetworkGraph({ width = 800, height = 600, onReady }: NetworkGraphProps) {
-  const graphRef = useRef<any>();
+  const graphRef = useRef<any>(null);
   const animationRef = useRef<number>(0);
   
   // Subscribe to raw state and compute filtered data in useMemo
@@ -148,6 +148,21 @@ export function NetworkGraph({ width = 800, height = 600, onReady }: NetworkGrap
     }
   }, [selectedNodeId, hoveredNodeId]);
 
+  // Pointer area for click/hover detection
+  const paintNodePointerArea = useCallback((node: NodeObject, color: string, ctx: CanvasRenderingContext2D, globalScale: number) => {
+    const threatNode = node as unknown as ThreatNode;
+    const baseSize = 4 + threatNode.centrality * 12;
+    const size = baseSize / Math.sqrt(globalScale);
+    
+    // Add 12px of visual screen-space padding to make clicking extremely easy
+    const hitPadding = 12 / globalScale; 
+    
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(node.x ?? 0, node.y ?? 0, size + hitPadding, 0, 2 * Math.PI);
+    ctx.fill();
+  }, []);
+
   // Link styling
   const getLinkColor = useCallback((link: LinkObject) => {
     const threatLink = link as unknown as ThreatLink;
@@ -226,6 +241,7 @@ export function NetworkGraph({ width = 800, height = 600, onReady }: NetworkGrap
         // Performance optimizations
         nodeRelSize={6}
         nodeCanvasObject={paintNode}
+        nodePointerAreaPaint={paintNodePointerArea}
         nodeCanvasObjectMode={() => 'replace'}
         
         // Links

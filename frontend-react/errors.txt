@@ -1,0 +1,10 @@
+﻿src/components/ui/c2dashboard/C2Dashboard.tsx(50,10): error TS6133: 'isReady' is declared but its value is never read.
+src/components/ui/c2dashboard/GlobalControls.tsx(20,70): error TS6133: 'timeRange' is declared but its value is never read.
+src/components/ui/c2dashboard/NetworkGraph.tsx(31,20): error TS2554: Expected 1 arguments, but got 0.
+src/components/ui/NodeInspector.tsx(20,17): error TS6133: 'useMemo' is declared but its value is never read.
+src/components/ui/NodeInspector.tsx(23,3): error TS6196: 'AttributionResult' is declared but never used.
+src/components/ui/NodeInspector.tsx(302,43): error TS6133: 'i' is declared but its value is never read.
+src/components/ui/ThreatGraph.tsx(30,15): error TS6196: 'ForceGraphMethods' is declared but never used.
+src/components/ui/ThreatGraph.tsx(98,20): error TS2554: Expected 1 arguments, but got 0.
+src/components/ui/TimingScatter.tsx(122,10): error TS6133: 'hoveredNode' is declared but its value is never read.
+src/components/ui/TimingScatter.tsx(122,23): error TS6133: 'setHoveredNode' is declared but its value is never read.
