@@ -1,20 +1,26 @@
 FROM python:3.11-slim
 
-# Set working directory inside container
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Install dependencies first (for Docker layer caching)
+# Install system deps (important for ML)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the backend code
+# Copy backend code
 COPY . .
 
-# Seed the database on startup
-RUN python -m db.seed_db
-
-# Expose the port Render will use
+# Expose port (optional)
 EXPOSE 10000
 
-# Start the FastAPI server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+# Run DB seed at runtime + start server
+CMD ["sh", "-c", "python -m db.seed_db && gunicorn -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT"]
